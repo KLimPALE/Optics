@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 
-driver_folders = ['ftdi', 'prolific', 'cypress']
+driver_folders = ['cypress', 'ftdi', 'keysight', 'prolific']
 driver_files = []
 
 for folder in driver_folders:

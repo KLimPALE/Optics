@@ -1,953 +1,689 @@
-"""
-Модуль для управления монохроматором через SDK SolarLS
-"""
-
 import ctypes
-import os
-import time
+
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Tuple
+from typing import List
 
 
-class MonochromatorError(Exception):
-    """Исключение для ошибок монохроматора"""
-    pass
-
-
-class ShutterState:
-    """Состояния затвора"""
-    UNKNOWN = 0
-    OPEN = 1
-    CLOSE = 2
-
-
-class InstrumentStatus:
-    """Статусы инструмента"""
-    BUSY = 0
-    READY = 1
-    ERROR = 2
-
-
-class Monochromator:
-    """
-    Класс для управления монохроматором через SDK SolarLS
-    
-    Пример использования:
-        mono = Monochromator(sdk_path="sdk")
-        if mono.connect():
-            mono.set_wavelength(500)
-            print(f"Текущая длина волны: {mono.get_wavelength()} нм")
-            mono.disconnect()
-    """
-    
-    def __init__(self, sdk_path: str = "sdk", config_path: Optional[str] = None):
-        """
-        Инициализация монохроматора
-        
-        Args:
-            sdk_path: Путь к папке с DLL файлами SDK
-            config_path: Путь к конфигурационному файлу (если None, используется папка с DLL)
-        """
+class Chromator:
+    def __init__(self, sdk_path: str = "sdk"):
         self.sdk_path = Path(sdk_path)
-        self.config_path = config_path
-        self.dll = None
+        self.library_handle = None
+        self.instrument_index = 0
         self.is_initialized = False
-        self.instrument_count = 0
-        self.instrument_name = None
-        self.current_instrument_idx = 0
-        
-        # Кэш для параметров
-        self._grating_count = None
-        self._gratings_cache = None
-        self._slit_count = None
-        self._filter_count = None
-        self._mirror_count = None
-        self._shutter_count = None
-        
-    def _add_dll_directory(self):
-        """Добавление пути к DLL в системный поиск"""
-        if hasattr(os, 'add_dll_directory'):
-            try:
-                os.add_dll_directory(str(self.sdk_path.absolute()))
-            except Exception:
-                pass
-    
-    def _configure_function_types(self):
-        """Настройка типов аргументов для функций DLL"""
-        
-        # Общие функции
-        self.dll.sls_Init.argtypes = [ctypes.c_char_p]
-        self.dll.sls_Init.restype = ctypes.c_int
-        
-        self.dll.sls_GetInstrumentCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
-        self.dll.sls_GetInstrumentCount.restype = ctypes.c_int
-        
-        self.dll.sls_GetInstrumentName.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
-        self.dll.sls_GetInstrumentName.restype = ctypes.c_int
-        
-        self.dll.sls_GetInstrumentSerial.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
-        self.dll.sls_GetInstrumentSerial.restype = ctypes.c_int
-        
-        self.dll.sls_GetInstrumentStatus.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-        self.dll.sls_GetInstrumentStatus.restype = ctypes.c_int
-        
-        self.dll.sls_GetLastErrorText.argtypes = [ctypes.c_char_p, ctypes.c_int]
-        self.dll.sls_GetLastErrorText.restype = None
-        
-        # Управление длиной волны
-        self.dll.sls_SetWl.argtypes = [ctypes.c_int, ctypes.c_double]
-        self.dll.sls_SetWl.restype = ctypes.c_int
-        
-        self.dll.sls_SetWlAsync.argtypes = [ctypes.c_int, ctypes.c_double]
-        self.dll.sls_SetWlAsync.restype = ctypes.c_int
-        
-        self.dll.sls_GetWl.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
-        self.dll.sls_GetWl.restype = ctypes.c_int
-        
-        self.dll.sls_IsValidWl.argtypes = [ctypes.c_int, ctypes.c_double, ctypes.POINTER(ctypes.c_int)]
-        self.dll.sls_IsValidWl.restype = ctypes.c_int
-        
-        self.dll.sls_ResetGrating.argtypes = [ctypes.c_int]
-        self.dll.sls_ResetGrating.restype = ctypes.c_int
-        
-        self.dll.sls_ResetSetGrating.argtypes = [ctypes.c_int, ctypes.c_double]
-        self.dll.sls_ResetSetGrating.restype = ctypes.c_int
-        
-        self.dll.sls_GetDispersion.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
-        self.dll.sls_GetDispersion.restype = ctypes.c_int
-        
-        # Управление решётками
-        self.dll.sls_GetGratingCount.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-        self.dll.sls_GetGratingCount.restype = ctypes.c_int
-        
-        self.dll.sls_GetActiveGrating.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-        self.dll.sls_GetActiveGrating.restype = ctypes.c_int
-        
-        self.dll.sls_SetActiveGrating.argtypes = [ctypes.c_int, ctypes.c_int]
-        self.dll.sls_SetActiveGrating.restype = ctypes.c_int
-        
-        self.dll.sls_GetGratingPrm.argtypes = [
-            ctypes.c_int, ctypes.c_int,
-            ctypes.POINTER(ctypes.c_int),
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double)
-        ]
-        self.dll.sls_GetGratingPrm.restype = ctypes.c_int
-        
-        # Управление щелями
-        self.dll.sls_GetSlitCount.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-        self.dll.sls_GetSlitCount.restype = ctypes.c_int
-        
-        self.dll.sls_GetSlitName.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
-        self.dll.sls_GetSlitName.restype = ctypes.c_int
-        
-        self.dll.sls_SetSlitWidth.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_double, ctypes.c_bool]
-        self.dll.sls_SetSlitWidth.restype = ctypes.c_int
-        
-        self.dll.sls_GetSlitWidth.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
-        self.dll.sls_GetSlitWidth.restype = ctypes.c_int
-        
-        # Управление затворами
-        self.dll.sls_GetShutterCount.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-        self.dll.sls_GetShutterCount.restype = ctypes.c_int
-        
-        self.dll.sls_GetShutterName.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
-        self.dll.sls_GetShutterName.restype = ctypes.c_int
-        
-        self.dll.sls_ShutterOpen.argtypes = [ctypes.c_int, ctypes.c_int]
-        self.dll.sls_ShutterOpen.restype = ctypes.c_int
-        
-        self.dll.sls_ShutterClose.argtypes = [ctypes.c_int, ctypes.c_int]
-        self.dll.sls_ShutterClose.restype = ctypes.c_int
-        
-        self.dll.sls_GetShutterState.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-        self.dll.sls_GetShutterState.restype = ctypes.c_int
-        
-        # Управление фильтрами
-        self.dll.sls_GetFilterCount.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-        self.dll.sls_GetFilterCount.restype = ctypes.c_int
-        
-        self.dll.sls_GetFilterName.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
-        self.dll.sls_GetFilterName.restype = ctypes.c_int
-        
-        self.dll.sls_GetFilterStateCount.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-        self.dll.sls_GetFilterStateCount.restype = ctypes.c_int
-        
-        self.dll.sls_GetFilterStateIdx.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-        self.dll.sls_GetFilterStateIdx.restype = ctypes.c_int
-        
-        self.dll.sls_SetFilterStateIdx.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
-        self.dll.sls_SetFilterStateIdx.restype = ctypes.c_int
-        
-        # Калибровка
-        self.dll.sls_GetPixelClbr.argtypes = [
-            ctypes.c_int, ctypes.c_double, ctypes.c_int,
-            ctypes.c_double, ctypes.c_int, ctypes.POINTER(ctypes.c_double)
-        ]
-        self.dll.sls_GetPixelClbr.restype = ctypes.c_int
-        
-    def _get_last_error(self) -> str:
-        """Получение текста последней ошибки"""
-        error_buffer = ctypes.create_string_buffer(512)
-        if self.dll:
-            self.dll.sls_GetLastErrorText(error_buffer, 512)
-        return error_buffer.value.decode('utf-8', errors='ignore')
-    
-    def _check_result(self, result: int, operation: str) -> bool:
-        """
-        Проверка результата операции
-        
-        Args:
-            result: Код возврата из DLL
-            operation: Название операции для сообщения об ошибке
-            
-        Returns:
-            True если успешно, иначе False
-            
-        Raises:
-            MonochromatorError: Если операция не удалась
-        """
-        if result:
-            return True
-        else:
-            error_msg = self._get_last_error()
-            raise MonochromatorError(f"{operation} failed: {error_msg}")
-    
-    def connect(self) -> bool:
-        """
-        Подключение к монохроматору
-        
-        Returns:
-            True если подключение успешно, иначе False
-        """
-        try:
-            # Добавляем путь к DLL
-            self._add_dll_directory()
-            
-            # Загружаем DLL
-            dll_path = self.sdk_path / "SolarLS.Sdk.dll"
-            if not dll_path.exists():
-                raise MonochromatorError(f"DLL not found: {dll_path}")
-            
-            self.dll = ctypes.CDLL(str(dll_path))
-            self._configure_function_types()
-            
-            # Инициализация библиотеки
-            config_path_bytes = None
-            if self.config_path:
-                config_path_bytes = self.config_path.encode('utf-8')
-            elif self.sdk_path:
-                # Используем папку с SDK как путь к конфигурации
-                config_path_bytes = str(self.sdk_path).encode('utf-8')
-            
-            result = self.dll.sls_Init(config_path_bytes)
-            if not result:
-                error_msg = self._get_last_error()
-                raise MonochromatorError(f"Init failed: {error_msg}")
-            
-            # Получаем количество инструментов
-            count = ctypes.c_int()
-            result = self.dll.sls_GetInstrumentCount(ctypes.byref(count))
-            if not result or count.value == 0:
-                raise MonochromatorError("No instruments found")
-            
-            self.instrument_count = count.value
-            
-            # Получаем имя первого инструмента
-            name_buffer = ctypes.create_string_buffer(256)
-            result = self.dll.sls_GetInstrumentName(0, name_buffer, 256)
-            if result:
-                self.instrument_name = name_buffer.value.decode('utf-8', errors='ignore')
-            
-            self.is_initialized = True
-            return True
-            
-        except Exception as e:
-            self.is_initialized = False
-            raise MonochromatorError(f"Connection failed: {e}")
-    
-    def disconnect(self):
-        """Отключение от монохроматора"""
-        # SDK не предоставляет явной функции деинициализации
-        self.is_initialized = False
-        self.dll = None
-    
-    def is_connected(self) -> bool:
-        """Проверка подключения"""
-        return self.is_initialized and self.dll is not None
-    
-    def get_status(self) -> int:
-        """
-        Получение статуса инструмента
-        
-        Returns:
-            InstrumentStatus: 0-BUSY, 1-READY, 2-ERROR
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        status = ctypes.c_int()
-        result = self.dll.sls_GetInstrumentStatus(self.current_instrument_idx, ctypes.byref(status))
-        self._check_result(result, "Get instrument status")
-        
-        return status.value
-    
-    def is_ready(self) -> bool:
-        """Проверка готовности инструмента"""
-        return self.get_status() == InstrumentStatus.READY
-    
-    def wait_for_ready(self, timeout: float = 30.0, check_interval: float = 0.5) -> bool:
-        """
-        Ожидание готовности инструмента
-        
-        Args:
-            timeout: Таймаут в секундах
-            check_interval: Интервал проверки в секундах
-            
-        Returns:
-            True если инструмент готов, False если таймаут
-        """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if self.is_ready():
-                return True
-            time.sleep(check_interval)
-        return False
-    
-    def ensure_ready(self) -> bool:
-        """Гарантирует готовность монохроматора к работе"""
-        try:
-            status = self.get_status()
-            if status == InstrumentStatus.ERROR:
-                self.reset_grating()
-                time.sleep(3)
-                return self.get_status() == InstrumentStatus.READY
-            return status == InstrumentStatus.READY
-        except MonochromatorError as e:
-            if "offline" in str(e).lower():
-                # Переподключаемся
-                self.disconnect()
-                time.sleep(1)
-                self.connect()
-                time.sleep(2)
-                self.reset_grating()
-                time.sleep(3)
-                return self.get_status() == InstrumentStatus.READY
-            raise
 
-    # ==================== Управление длиной волны ====================
-    
-    def set_wavelength(self, wavelength: float, async_mode: bool = False, wait: bool = True) -> bool:
-        """
-        Установка длины волны
-        
-        Args:
-            wavelength: Длина волны в нанометрах
-            async_mode: Асинхронный режим (не ждать завершения)
-            wait: Ожидать готовности после установки (только для синхронного режима)
-            
-        Returns:
-            True если успешно
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        if async_mode:
-            result = self.dll.sls_SetWlAsync(self.current_instrument_idx, ctypes.c_double(wavelength))
-            self._check_result(result, f"Set wavelength async to {wavelength} nm")
-        else:
-            result = self.dll.sls_SetWl(self.current_instrument_idx, ctypes.c_double(wavelength))
-            self._check_result(result, f"Set wavelength to {wavelength} nm")
-            
-            if wait:
-                self.wait_for_ready()
-        
-        return True
-    
-    def get_wavelength(self) -> float:
-        """
-        Получение текущей длины волны
-        
-        Returns:
-            Текущая длина волны в нанометрах
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        wavelength = ctypes.c_double()
-        result = self.dll.sls_GetWl(self.current_instrument_idx, ctypes.byref(wavelength))
-        self._check_result(result, "Get wavelength")
-        
-        return wavelength.value
-    
-    def is_valid_wavelength(self, wavelength: float) -> bool:
-        """
-        Проверка возможности установки длины волны
-        
-        Args:
-            wavelength: Длина волны в нанометрах
-            
-        Returns:
-            True если длина волны доступна
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        is_valid = ctypes.c_int()
-        result = self.dll.sls_IsValidWl(self.current_instrument_idx, ctypes.c_double(wavelength), ctypes.byref(is_valid))
-        self._check_result(result, "Check valid wavelength")
-        
-        return bool(is_valid.value)
-    
-    def reset_grating(self, async_mode: bool = False) -> bool:
-        """
-        Сброс решётки (перемещение в реперную позицию)
-        
-        Args:
-            async_mode: Асинхронный режим
-            
-        Returns:
-            True если успешно
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        if async_mode:
-            result = self.dll.sls_ResetGratingAsync(self.current_instrument_idx)
-        else:
-            result = self.dll.sls_ResetGrating(self.current_instrument_idx)
-        
-        self._check_result(result, "Reset grating")
-        return True
-    
-    def reset_and_set_wavelength(self, wavelength: float, async_mode: bool = False) -> bool:
-        """
-        Сброс решётки и установка длины волны
-        
-        Args:
-            wavelength: Длина волны в нанометрах
-            async_mode: Асинхронный режим
-            
-        Returns:
-            True если успешно
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        if async_mode:
-            result = self.dll.sls_ResetSetGrating(self.current_instrument_idx, ctypes.c_double(wavelength))
-        else:
-            result = self.dll.sls_ResetSetGrating(self.current_instrument_idx, ctypes.c_double(wavelength))
-        
-        self._check_result(result, f"Reset and set wavelength to {wavelength} nm")
-        return True
-    
-    def get_dispersion(self) -> float:
-        """
-        Получение дисперсии для активной решётки при текущей длине волны
-        
-        Returns:
-            Дисперсия
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        dispersion = ctypes.c_double()
-        result = self.dll.sls_GetDispersion(self.current_instrument_idx, ctypes.byref(dispersion))
-        self._check_result(result, "Get dispersion")
-        
-        return dispersion.value
-    
-    # ==================== Управление решётками ====================
-    
-    def get_grating_count(self) -> int:
-        """Получение количества решёток"""
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        if self._grating_count is None:
-            count = ctypes.c_int()
-            result = self.dll.sls_GetGratingCount(self.current_instrument_idx, ctypes.byref(count))
-            self._check_result(result, "Get grating count")
-            self._grating_count = count.value
-        
-        return self._grating_count
-    
-    def get_active_grating(self) -> int:
-        """Получение индекса активной решётки"""
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        grating_idx = ctypes.c_int()
-        result = self.dll.sls_GetActiveGrating(self.current_instrument_idx, ctypes.byref(grating_idx))
-        self._check_result(result, "Get active grating")
-        
-        return grating_idx.value
-    
-    def set_active_grating(self, grating_idx: int, async_mode: bool = False) -> bool:
-        """
-        Установка активной решётки
-        
-        Args:
-            grating_idx: Индекс решётки
-            async_mode: Асинхронный режим
-            
-        Returns:
-            True если успешно
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        count = self.get_grating_count()
-        if grating_idx < 0 or grating_idx >= count:
-            raise MonochromatorError(f"Grating index {grating_idx} out of range (0-{count-1})")
-        
-        if async_mode:
-            result = self.dll.sls_SetActiveGratingAsync(self.current_instrument_idx, grating_idx)
-        else:
-            result = self.dll.sls_SetActiveGrating(self.current_instrument_idx, grating_idx)
-        
-        self._check_result(result, f"Set active grating to {grating_idx}")
-        return True
-    
-    def get_grating_parameters(self, grating_idx: int) -> Dict[str, Any]:
-        """
-        Получение параметров решётки
-        
-        Args:
-            grating_idx: Индекс решётки
-            
-        Returns:
-            Словарь с параметрами: grooves, min_wl, max_wl, blaze_angle
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        grooves = ctypes.c_int()
-        min_wl = ctypes.c_double()
-        max_wl = ctypes.c_double()
-        blaze_angle = ctypes.c_double()
-        
-        result = self.dll.sls_GetGratingPrm(
-            self.current_instrument_idx, grating_idx,
-            ctypes.byref(grooves),
-            ctypes.byref(min_wl),
-            ctypes.byref(max_wl),
-            ctypes.byref(blaze_angle)
-        )
-        self._check_result(result, f"Get grating parameters for index {grating_idx}")
-        
-        return {
-            'grooves': grooves.value,
-            'min_wl': min_wl.value,
-            'max_wl': max_wl.value,
-            'blaze_angle': blaze_angle.value
-        }
-    
-    def get_all_gratings(self) -> List[Dict[str, Any]]:
-        """Получение информации о всех решётках"""
-        count = self.get_grating_count()
-        gratings = []
-        
-        for i in range(count):
-            params = self.get_grating_parameters(i)
-            params['index'] = i
-            params['is_active'] = (self.get_active_grating() == i)
-            gratings.append(params)
-        
-        return gratings
-    
-    # ==================== Управление щелями ====================
-    
-    def get_slit_count(self) -> int:
-        """Получение количества щелей"""
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        if self._slit_count is None:
-            count = ctypes.c_int()
-            result = self.dll.sls_GetSlitCount(self.current_instrument_idx, ctypes.byref(count))
-            self._check_result(result, "Get slit count")
-            self._slit_count = count.value
-        
-        return self._slit_count
-    
-    def get_slit_name(self, slit_idx: int) -> str:
-        """
-        Получение названия щели
-        
-        Args:
-            slit_idx: Индекс щели
-            
-        Returns:
-            Название щели
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        name_buffer = ctypes.create_string_buffer(256)
-        result = self.dll.sls_GetSlitName(self.current_instrument_idx, slit_idx, name_buffer, 256)
-        self._check_result(result, f"Get slit name for index {slit_idx}")
-        
-        return name_buffer.value.decode('utf-8', errors='ignore')
-    
-    def set_slit_width(self, slit_idx: int, width: float, reset_required: bool = False, async_mode: bool = False) -> bool:
-        """
-        Установка ширины щели
-        
-        Args:
-            slit_idx: Индекс щели
-            width: Ширина в микрометрах
-            reset_required: Требуется ли сброс перед установкой
-            async_mode: Асинхронный режим
-            
-        Returns:
-            True если успешно
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        if async_mode:
-            result = self.dll.sls_SetSlitWidthAsync(self.current_instrument_idx, slit_idx, ctypes.c_double(width), reset_required)
-        else:
-            result = self.dll.sls_SetSlitWidth(self.current_instrument_idx, slit_idx, ctypes.c_double(width), reset_required)
-        
-        self._check_result(result, f"Set slit {slit_idx} width to {width} um")
-        return True
-    
-    def get_slit_width(self, slit_idx: int) -> float:
-        """
-        Получение ширины щели
-        
-        Args:
-            slit_idx: Индекс щели
-            
-        Returns:
-            Ширина в микрометрах
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        width = ctypes.c_double()
-        result = self.dll.sls_GetSlitWidth(self.current_instrument_idx, slit_idx, ctypes.byref(width))
-        self._check_result(result, f"Get slit {slit_idx} width")
-        
-        return width.value
-    
-    # ==================== Управление затворами ====================
-    
-    def get_shutter_count(self) -> int:
-        """Получение количества затворов"""
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        if self._shutter_count is None:
-            count = ctypes.c_int()
-            result = self.dll.sls_GetShutterCount(self.current_instrument_idx, ctypes.byref(count))
-            self._check_result(result, "Get shutter count")
-            self._shutter_count = count.value
-        
-        return self._shutter_count
-    
-    def get_shutter_name(self, shutter_idx: int) -> str:
-        """
-        Получение названия затвора
-        
-        Args:
-            shutter_idx: Индекс затвора
-            
-        Returns:
-            Название затвора
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        name_buffer = ctypes.create_string_buffer(256)
-        result = self.dll.sls_GetShutterName(self.current_instrument_idx, shutter_idx, name_buffer, 256)
-        self._check_result(result, f"Get shutter name for index {shutter_idx}")
-        
-        return name_buffer.value.decode('utf-8', errors='ignore')
-    
-    def shutter_open(self, shutter_idx: int = 0, async_mode: bool = False) -> bool:
-        """
-        Открытие затвора
-        
-        Args:
-            shutter_idx: Индекс затвора
-            async_mode: Асинхронный режим
-            
-        Returns:
-            True если успешно
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        if async_mode:
-            result = self.dll.sls_ShutterOpenAsync(self.current_instrument_idx, shutter_idx)
-        else:
-            result = self.dll.sls_ShutterOpen(self.current_instrument_idx, shutter_idx)
-        
-        self._check_result(result, f"Open shutter {shutter_idx}")
-        return True
-    
-    def shutter_close(self, shutter_idx: int = 0, async_mode: bool = False) -> bool:
-        """
-        Закрытие затвора
-        
-        Args:
-            shutter_idx: Индекс затвора
-            async_mode: Асинхронный режим
-            
-        Returns:
-            True если успешно
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        if async_mode:
-            result = self.dll.sls_ShutterCloseAsync(self.current_instrument_idx, shutter_idx)
-        else:
-            result = self.dll.sls_ShutterClose(self.current_instrument_idx, shutter_idx)
-        
-        self._check_result(result, f"Close shutter {shutter_idx}")
-        return True
-    
-    def get_shutter_state(self, shutter_idx: int = 0) -> int:
-        """
-        Получение состояния затвора
-        
-        Args:
-            shutter_idx: Индекс затвора
-            
-        Returns:
-            ShutterState: 0-UNKNOWN, 1-OPEN, 2-CLOSE
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        state = ctypes.c_int()
-        result = self.dll.sls_GetShutterState(self.current_instrument_idx, shutter_idx, ctypes.byref(state))
-        self._check_result(result, f"Get shutter {shutter_idx} state")
-        
-        return state.value
-    
-    def is_shutter_open(self, shutter_idx: int = 0) -> bool:
-        """Проверка открыт ли затвор"""
-        return self.get_shutter_state(shutter_idx) == ShutterState.OPEN
-    
-    # ==================== Управление фильтрами ====================
-    
-    def get_filter_count(self) -> int:
-        """Получение количества фильтров"""
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        if self._filter_count is None:
-            count = ctypes.c_int()
-            result = self.dll.sls_GetFilterCount(self.current_instrument_idx, ctypes.byref(count))
-            self._check_result(result, "Get filter count")
-            self._filter_count = count.value
-        
-        return self._filter_count
-    
-    def get_filter_name(self, filter_idx: int) -> str:
-        """
-        Получение названия фильтра
-        
-        Args:
-            filter_idx: Индекс фильтра
-            
-        Returns:
-            Название фильтра
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        name_buffer = ctypes.create_string_buffer(256)
-        result = self.dll.sls_GetFilterName(self.current_instrument_idx, filter_idx, name_buffer, 256)
-        self._check_result(result, f"Get filter name for index {filter_idx}")
-        
-        return name_buffer.value.decode('utf-8', errors='ignore')
-    
-    def get_filter_state_count(self, filter_idx: int) -> int:
-        """
-        Получение количества состояний фильтра
-        
-        Args:
-            filter_idx: Индекс фильтра
-            
-        Returns:
-            Количество состояний
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        count = ctypes.c_int()
-        result = self.dll.sls_GetFilterStateCount(self.current_instrument_idx, filter_idx, ctypes.byref(count))
-        self._check_result(result, f"Get filter state count for index {filter_idx}")
-        
-        return count.value
-    
-    def get_filter_state(self, filter_idx: int) -> int:
-        """
-        Получение текущего состояния фильтра
-        
-        Args:
-            filter_idx: Индекс фильтра
-            
-        Returns:
-            Индекс текущего состояния
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        state_idx = ctypes.c_int()
-        result = self.dll.sls_GetFilterStateIdx(self.current_instrument_idx, filter_idx, ctypes.byref(state_idx))
-        self._check_result(result, f"Get filter {filter_idx} state")
-        
-        return state_idx.value
-    
-    def set_filter_state(self, filter_idx: int, state_idx: int, async_mode: bool = False) -> bool:
-        """
-        Установка состояния фильтра
-        
-        Args:
-            filter_idx: Индекс фильтра
-            state_idx: Индекс состояния
-            async_mode: Асинхронный режим
-            
-        Returns:
-            True если успешно
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        if async_mode:
-            result = self.dll.sls_SetFilterStateIdxAsync(self.current_instrument_idx, filter_idx, state_idx)
-        else:
-            result = self.dll.sls_SetFilterStateIdx(self.current_instrument_idx, filter_idx, state_idx)
-        
-        self._check_result(result, f"Set filter {filter_idx} state to {state_idx}")
-        return True
-    
-    # ==================== Калибровка ====================
-    
-    def get_wavelength_at_pixel(self, central_wl: float, central_pixel: int, 
-                                 pixel_pitch: float, pixel_num: int) -> float:
-        """
-        Получение длины волны для указанного пикселя
-        
-        Args:
-            central_wl: Длина волны на центральном пикселе
-            central_pixel: Номер центрального пикселя
-            pixel_pitch: Размер пикселя в микрометрах
-            pixel_num: Номер пикселя для расчёта
-            
-        Returns:
-            Длина волны для указанного пикселя
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        wl = ctypes.c_double()
-        result = self.dll.sls_GetPixelClbr(
-            self.current_instrument_idx,
-            ctypes.c_double(central_wl),
-            central_pixel,
-            ctypes.c_double(pixel_pitch),
-            pixel_num,
-            ctypes.byref(wl)
-        )
-        self._check_result(result, "Get wavelength at pixel")
-        
-        return wl.value
-    
-    def get_calibration_array(self, central_wl: float, central_pixel: int,
-                               pixel_pitch: float, pixel_count: int) -> List[float]:
-        """
-        Получение массива калибровки для всех пикселей
-        
-        Args:
-            central_wl: Длина волны на центральном пикселе
-            central_pixel: Номер центрального пикселя
-            pixel_pitch: Размер пикселя в микрометрах
-            pixel_count: Количество пикселей
-            
-        Returns:
-            Список длин волн для каждого пикселя
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        calibration_array = (ctypes.c_double * pixel_count)()
-        result = self.dll.sls_GetCalibration(
-            self.current_instrument_idx,
-            ctypes.c_double(central_wl),
-            central_pixel,
-            ctypes.c_double(pixel_pitch),
-            pixel_count,
-            calibration_array
-        )
-        self._check_result(result, "Get calibration array")
-        
-        return [calibration_array[i] for i in range(pixel_count)]
-    
-    # ==================== Информационные методы ====================
-    
+
+    def connect(self) -> bool:
+        connection_status = False
+
+        if hasattr(ctypes, 'add_dll_directory'):
+            ctypes.add_dll_directory(str(self.sdk_path.absolute()))
+
+        library_path = self.sdk_path / "SolarLS.Sdk.dll"
+
+        if library_path.exists():
+            self.library_handle = ctypes.CDLL(str(library_path))
+
+            self.library_handle.sls_Init.argtypes = [ctypes.c_char_p]
+            self.library_handle.sls_Init.restype = ctypes.c_int
+            self.library_handle.sls_GetInstrumentCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetInstrumentCount.restype = ctypes.c_int
+            self.library_handle.sls_GetInstrumentName.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+            self.library_handle.sls_GetInstrumentName.restype = ctypes.c_int
+            self.library_handle.sls_GetInstrumentSerial.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+            self.library_handle.sls_GetInstrumentSerial.restype = ctypes.c_int
+            self.library_handle.sls_GetWl.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
+            self.library_handle.sls_GetWl.restype = ctypes.c_int
+            self.library_handle.sls_SetWl.argtypes = [ctypes.c_int, ctypes.c_double]
+            self.library_handle.sls_SetWl.restype = ctypes.c_int
+            self.library_handle.sls_SetWlAsync.argtypes = [ctypes.c_int, ctypes.c_double]
+            self.library_handle.sls_SetWlAsync.restype = ctypes.c_int
+            self.library_handle.sls_IsValidWl.argtypes = [ctypes.c_int, ctypes.c_double, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_IsValidWl.restype = ctypes.c_int
+            self.library_handle.sls_IsValidWlGrating.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_double, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_IsValidWlGrating.restype = ctypes.c_int
+            self.library_handle.sls_GetSlitCount.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetSlitCount.restype = ctypes.c_int
+            self.library_handle.sls_GetSlitName.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+            self.library_handle.sls_GetSlitName.restype = ctypes.c_int
+            self.library_handle.sls_SetSlitWidth.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_double, ctypes.c_bool]
+            self.library_handle.sls_SetSlitWidth.restype = ctypes.c_int
+            self.library_handle.sls_SetSlitWidthAsync.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_double, ctypes.c_bool]
+            self.library_handle.sls_SetSlitWidthAsync.restype = ctypes.c_int
+            self.library_handle.sls_GetSlitWidth.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
+            self.library_handle.sls_GetSlitWidth.restype = ctypes.c_int
+            self.library_handle.sls_GetMirrorCount.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetMirrorCount.restype = ctypes.c_int
+            self.library_handle.sls_GetMirrorName.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+            self.library_handle.sls_GetMirrorName.restype = ctypes.c_int
+            self.library_handle.sls_GetMirrorStateCount.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetMirrorStateCount.restype = ctypes.c_int
+            self.library_handle.sls_GetMirrorStateName.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+            self.library_handle.sls_GetMirrorStateName.restype = ctypes.c_int
+            self.library_handle.sls_GetMirrorStateIdx.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetMirrorStateIdx.restype = ctypes.c_int
+            self.library_handle.sls_SetMirrorStateIdx.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+            self.library_handle.sls_SetMirrorStateIdx.restype = ctypes.c_int
+            self.library_handle.sls_SetMirrorStateIdxAsync.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+            self.library_handle.sls_SetMirrorStateIdxAsync.restype = ctypes.c_int
+            self.library_handle.sls_GetFilterCount.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetFilterCount.restype = ctypes.c_int
+            self.library_handle.sls_GetFilterName.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+            self.library_handle.sls_GetFilterName.restype = ctypes.c_int
+            self.library_handle.sls_GetFilterStateCount.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetFilterStateCount.restype = ctypes.c_int
+            self.library_handle.sls_GetFilterStateName.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+            self.library_handle.sls_GetFilterStateName.restype = ctypes.c_int
+            self.library_handle.sls_GetFilterStatePrm.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetFilterStatePrm.restype = ctypes.c_int
+            self.library_handle.sls_GetFilterStateIdx.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetFilterStateIdx.restype = ctypes.c_int
+            self.library_handle.sls_SetFilterStateIdx.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+            self.library_handle.sls_SetFilterStateIdx.restype = ctypes.c_int
+            self.library_handle.sls_SetFilterStateIdxAsync.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+            self.library_handle.sls_SetFilterStateIdxAsync.restype = ctypes.c_int
+            self.library_handle.sls_GetShutterCount.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetShutterCount.restype = ctypes.c_int
+            self.library_handle.sls_GetShutterName.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+            self.library_handle.sls_GetShutterName.restype = ctypes.c_int
+            self.library_handle.sls_ShutterOpen.argtypes = [ctypes.c_int, ctypes.c_int]
+            self.library_handle.sls_ShutterOpen.restype = ctypes.c_int
+            self.library_handle.sls_ShutterOpenAsync.argtypes = [ctypes.c_int, ctypes.c_int]
+            self.library_handle.sls_ShutterOpenAsync.restype = ctypes.c_int
+            self.library_handle.sls_ShutterClose.argtypes = [ctypes.c_int, ctypes.c_int]
+            self.library_handle.sls_ShutterClose.restype = ctypes.c_int
+            self.library_handle.sls_ShutterCloseAsync.argtypes = [ctypes.c_int, ctypes.c_int]
+            self.library_handle.sls_ShutterCloseAsync.restype = ctypes.c_int
+            self.library_handle.sls_GetShutterState.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetShutterState.restype = ctypes.c_int
+            self.library_handle.sls_GetGratingCount.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetGratingCount.restype = ctypes.c_int
+            self.library_handle.sls_GetActiveGrating.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetActiveGrating.restype = ctypes.c_int
+            self.library_handle.sls_SetActiveGrating.argtypes = [ctypes.c_int, ctypes.c_int]
+            self.library_handle.sls_SetActiveGrating.restype = ctypes.c_int
+            self.library_handle.sls_SetActiveGratingAsync.argtypes = [ctypes.c_int, ctypes.c_int]
+            self.library_handle.sls_SetActiveGratingAsync.restype = ctypes.c_int
+            self.library_handle.sls_GetGratingPrm.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)]
+            self.library_handle.sls_GetGratingPrm.restype = ctypes.c_int
+            self.library_handle.sls_GetPixelClbr.argtypes = [ctypes.c_int, ctypes.c_double, ctypes.c_int, ctypes.c_double, ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
+            self.library_handle.sls_GetPixelClbr.restype = ctypes.c_int
+            self.library_handle.sls_GetCalibration.argtypes = [ctypes.c_int, ctypes.c_double, ctypes.c_int, ctypes.c_double, ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
+            self.library_handle.sls_GetCalibration.restype = ctypes.c_int
+            self.library_handle.sls_GetDispersion.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
+            self.library_handle.sls_GetDispersion.restype = ctypes.c_int
+            self.library_handle.sls_ResetGrating.argtypes = [ctypes.c_int]
+            self.library_handle.sls_ResetGrating.restype = ctypes.c_int
+            self.library_handle.sls_ResetGratingAsync.argtypes = [ctypes.c_int]
+            self.library_handle.sls_ResetGratingAsync.restype = ctypes.c_int
+            self.library_handle.sls_ResetSetGrating.argtypes = [ctypes.c_int, ctypes.c_double]
+            self.library_handle.sls_ResetSetGrating.restype = ctypes.c_int
+            self.library_handle.sls_GetInstrumentStatus.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.library_handle.sls_GetInstrumentStatus.restype = ctypes.c_int
+            self.library_handle.sls_GetLastErrorText.argtypes = [ctypes.c_char_p, ctypes.c_int]
+            self.library_handle.sls_GetLastErrorText.restype = None
+
+            configuration_path = str(self.sdk_path).encode('utf-8')
+            initialization_result = self.library_handle.sls_Init(configuration_path)
+
+            if initialization_result:
+                instrument_count = ctypes.c_int()
+                self.library_handle.sls_GetInstrumentCount(ctypes.byref(instrument_count))
+
+                if instrument_count.value > 0:
+                    self.is_initialized = True
+                    connection_status = True
+
+        return connection_status
+
+
+    def disconnect(self):
+        self.is_initialized = False
+        self.library_handle = None
+
+
+    def get_last_error(self) -> str:
+        error_message = ""
+
+        if self.is_initialized:
+            error_buffer = ctypes.create_string_buffer(512)
+            self.library_handle.sls_GetLastErrorText(error_buffer, 512)
+            error_message = error_buffer.value.decode('utf-8', errors='ignore')
+
+        return error_message
+
+
     def get_instrument_name(self) -> str:
-        """Получение имени инструмента"""
-        return self.instrument_name or "Unknown"
-    
-    def get_instrument_serial(self, instrument_idx: int = 0) -> str:
-        """
-        Получение серийного номера инструмента
-        
-        Args:
-            instrument_idx: Индекс инструмента
-            
-        Returns:
-            Серийный номер
-        """
-        if not self.is_connected():
-            raise MonochromatorError("Not connected")
-        
-        serial_buffer = ctypes.create_string_buffer(256)
-        result = self.dll.sls_GetInstrumentSerial(instrument_idx, serial_buffer, 256)
-        self._check_result(result, "Get instrument serial")
-        
-        return serial_buffer.value.decode('utf-8', errors='ignore')
-    
-    def get_info(self) -> Dict[str, Any]:
-        """
-        Получение полной информации о монохроматоре
-        
-        Returns:
-            Словарь с информацией
-        """
-        info = {
-            'connected': self.is_connected(),
-            'instrument_name': self.get_instrument_name(),
-            'instrument_count': self.instrument_count,
-            'current_wavelength': None,
-            'status': None,
-            'active_grating': None,
-            'grating_count': None,
-            'slit_count': None,
-            'shutter_count': None,
-            'filter_count': None,
-        }
-        
-        if self.is_connected():
-            try:
-                info['current_wavelength'] = self.get_wavelength()
-                info['status'] = self.get_status()
-                info['active_grating'] = self.get_active_grating()
-                info['grating_count'] = self.get_grating_count()
-                info['slit_count'] = self.get_slit_count()
-                info['shutter_count'] = self.get_shutter_count()
-                info['filter_count'] = self.get_filter_count()
-            except MonochromatorError:
-                pass
-        
-        return info
+        instrument_name = ""
+
+        if self.is_initialized:
+            name_buffer = ctypes.create_string_buffer(256)
+            self.library_handle.sls_GetInstrumentName(self.instrument_index, name_buffer, 256)
+            instrument_name = name_buffer.value.decode('utf-8', errors='ignore')
+
+        return instrument_name
+
+
+    def get_instrument_serial(self) -> str:
+        serial_number = ""
+
+        if self.is_initialized:
+            serial_buffer = ctypes.create_string_buffer(256)
+            self.library_handle.sls_GetInstrumentSerial(self.instrument_index, serial_buffer, 256)
+            serial_number = serial_buffer.value.decode('utf-8', errors='ignore')
+
+        return serial_number
+
+
+    def set_wavelength(self, wavelength_nanometers: float) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_SetWl(self.instrument_index, ctypes.c_double(wavelength_nanometers))
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def set_wavelength_async(self, wavelength_nanometers: float) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_SetWlAsync(self.instrument_index, ctypes.c_double(wavelength_nanometers))
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def get_wavelength(self) -> float:
+        wavelength_value = 0.0
+
+        if self.is_initialized:
+            wavelength = ctypes.c_double()
+            self.library_handle.sls_GetWl(self.instrument_index, ctypes.byref(wavelength))
+            wavelength_value = wavelength.value
+
+        return wavelength_value
+
+
+    def is_valid_wavelength(self, wavelength_nanometers: float) -> bool:
+        validity_status = False
+
+        if self.is_initialized:
+            is_valid = ctypes.c_int()
+            self.library_handle.sls_IsValidWl(self.instrument_index, ctypes.c_double(wavelength_nanometers), ctypes.byref(is_valid))
+            validity_status = bool(is_valid.value)
+
+        return validity_status
+
+
+    def is_valid_wavelength_for_grating(self, grating_index: int, wavelength_nanometers: float) -> bool:
+        validity_status = False
+
+        if self.is_initialized:
+            is_valid = ctypes.c_int()
+            self.library_handle.sls_IsValidWlGrating(self.instrument_index, grating_index, ctypes.c_double(wavelength_nanometers), ctypes.byref(is_valid))
+            validity_status = bool(is_valid.value)
+
+        return validity_status
+
+
+    def get_status(self) -> int:
+        status_value = -1
+
+        if self.is_initialized:
+            instrument_status = ctypes.c_int()
+            self.library_handle.sls_GetInstrumentStatus(self.instrument_index, ctypes.byref(instrument_status))
+            status_value = instrument_status.value
+
+        return status_value
+
+
+    def is_ready(self) -> bool:
+        ready_status = False
+        status_value = self.get_status()
+        ready_status = status_value == 1
+
+        return ready_status
+
+
+    def get_grating_count(self) -> int:
+        grating_count_value = 0
+
+        if self.is_initialized:
+            grating_count = ctypes.c_int()
+            self.library_handle.sls_GetGratingCount(self.instrument_index, ctypes.byref(grating_count))
+            grating_count_value = grating_count.value
+
+        return grating_count_value
+
+
+    def get_active_grating(self) -> int:
+        active_grating_value = -1
+
+        if self.is_initialized:
+            active_grating = ctypes.c_int()
+            self.library_handle.sls_GetActiveGrating(self.instrument_index, ctypes.byref(active_grating))
+            active_grating_value = active_grating.value
+
+        return active_grating_value
+
+
+    def set_active_grating(self, grating_index: int) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_SetActiveGrating(self.instrument_index, grating_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def set_active_grating_async(self, grating_index: int) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_SetActiveGratingAsync(self.instrument_index, grating_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def get_grating_parameters(self, grating_index: int) -> Tuple[int, float, float, float]:
+        grooves_value = 0
+        minimum_wavelength = 0.0
+        maximum_wavelength = 0.0
+        blaze_angle_value = 0.0
+
+        if self.is_initialized:
+            grooves = ctypes.c_int()
+            minimum_wavelength_parameter = ctypes.c_double()
+            maximum_wavelength_parameter = ctypes.c_double()
+            blaze_angle = ctypes.c_double()
+            self.library_handle.sls_GetGratingPrm(
+                self.instrument_index,
+                grating_index,
+                ctypes.byref(grooves),
+                ctypes.byref(minimum_wavelength_parameter),
+                ctypes.byref(maximum_wavelength_parameter),
+                ctypes.byref(blaze_angle)
+            )
+            grooves_value = grooves.value
+            minimum_wavelength = minimum_wavelength_parameter.value
+            maximum_wavelength = maximum_wavelength_parameter.value
+            blaze_angle_value = blaze_angle.value
+
+        return grooves_value, minimum_wavelength, maximum_wavelength, blaze_angle_value
+
+
+    def reset_grating(self) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_ResetGrating(self.instrument_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def reset_grating_async(self) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_ResetGratingAsync(self.instrument_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def reset_and_set_wavelength(self, wavelength_nanometers: float) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_ResetSetGrating(self.instrument_index, ctypes.c_double(wavelength_nanometers))
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def get_dispersion(self) -> float:
+        dispersion_value = 0.0
+
+        if self.is_initialized:
+            dispersion = ctypes.c_double()
+            self.library_handle.sls_GetDispersion(self.instrument_index, ctypes.byref(dispersion))
+            dispersion_value = dispersion.value
+
+        return dispersion_value
+
+
+    def get_slit_count(self) -> int:
+        slit_count_value = 0
+
+        if self.is_initialized:
+            slit_count = ctypes.c_int()
+            self.library_handle.sls_GetSlitCount(self.instrument_index, ctypes.byref(slit_count))
+            slit_count_value = slit_count.value
+
+        return slit_count_value
+
+
+    def get_slit_name(self, slit_index: int) -> str:
+        slit_name = ""
+
+        if self.is_initialized:
+            name_buffer = ctypes.create_string_buffer(256)
+            self.library_handle.sls_GetSlitName(self.instrument_index, slit_index, name_buffer, 256)
+            slit_name = name_buffer.value.decode('utf-8', errors='ignore')
+
+        return slit_name
+
+
+    def set_slit_width(self, slit_index: int, width_micrometers: float, reset_required: bool = False) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_SetSlitWidth(self.instrument_index, slit_index, ctypes.c_double(width_micrometers), reset_required)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def set_slit_width_async(self, slit_index: int, width_micrometers: float, reset_required: bool = False) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_SetSlitWidthAsync(self.instrument_index, slit_index, ctypes.c_double(width_micrometers), reset_required)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def get_slit_width(self, slit_index: int) -> float:
+        slit_width_value = 0.0
+
+        if self.is_initialized:
+            slit_width = ctypes.c_double()
+            self.library_handle.sls_GetSlitWidth(self.instrument_index, slit_index, ctypes.byref(slit_width))
+            slit_width_value = slit_width.value
+
+        return slit_width_value
+
+
+    def get_mirror_count(self) -> int:
+        mirror_count_value = 0
+
+        if self.is_initialized:
+            mirror_count = ctypes.c_int()
+            self.library_handle.sls_GetMirrorCount(self.instrument_index, ctypes.byref(mirror_count))
+            mirror_count_value = mirror_count.value
+
+        return mirror_count_value
+
+
+    def get_mirror_name(self, mirror_index: int) -> str:
+        mirror_name = ""
+
+        if self.is_initialized:
+            name_buffer = ctypes.create_string_buffer(256)
+            self.library_handle.sls_GetMirrorName(self.instrument_index, mirror_index, name_buffer, 256)
+            mirror_name = name_buffer.value.decode('utf-8', errors='ignore')
+
+        return mirror_name
+
+
+    def get_mirror_state_count(self, mirror_index: int) -> int:
+        state_count_value = 0
+
+        if self.is_initialized:
+            state_count = ctypes.c_int()
+            self.library_handle.sls_GetMirrorStateCount(self.instrument_index, mirror_index, ctypes.byref(state_count))
+            state_count_value = state_count.value
+
+        return state_count_value
+
+
+    def get_mirror_state_name(self, mirror_index: int, state_index: int) -> str:
+        state_name = ""
+
+        if self.is_initialized:
+            name_buffer = ctypes.create_string_buffer(256)
+            self.library_handle.sls_GetMirrorStateName(self.instrument_index, mirror_index, state_index, name_buffer, 256)
+            state_name = name_buffer.value.decode('utf-8', errors='ignore')
+
+        return state_name
+
+
+    def get_mirror_state(self, mirror_index: int) -> int:
+        state_value = -1
+
+        if self.is_initialized:
+            state_index = ctypes.c_int()
+            self.library_handle.sls_GetMirrorStateIdx(self.instrument_index, mirror_index, ctypes.byref(state_index))
+            state_value = state_index.value
+
+        return state_value
+
+
+    def set_mirror_state(self, mirror_index: int, state_index: int) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_SetMirrorStateIdx(self.instrument_index, mirror_index, state_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def set_mirror_state_async(self, mirror_index: int, state_index: int) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_SetMirrorStateIdxAsync(self.instrument_index, mirror_index, state_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def get_filter_count(self) -> int:
+        filter_count_value = 0
+
+        if self.is_initialized:
+            filter_count = ctypes.c_int()
+            self.library_handle.sls_GetFilterCount(self.instrument_index, ctypes.byref(filter_count))
+            filter_count_value = filter_count.value
+
+        return filter_count_value
+
+
+    def get_filter_name(self, filter_index: int) -> str:
+        filter_name = ""
+
+        if self.is_initialized:
+            name_buffer = ctypes.create_string_buffer(256)
+            self.library_handle.sls_GetFilterName(self.instrument_index, filter_index, name_buffer, 256)
+            filter_name = name_buffer.value.decode('utf-8', errors='ignore')
+
+        return filter_name
+
+
+    def get_filter_state_count(self, filter_index: int) -> int:
+        state_count_value = 0
+
+        if self.is_initialized:
+            state_count = ctypes.c_int()
+            self.library_handle.sls_GetFilterStateCount(self.instrument_index, filter_index, ctypes.byref(state_count))
+            state_count_value = state_count.value
+
+        return state_count_value
+
+
+    def get_filter_state_name(self, filter_index: int, state_index: int) -> str:
+        state_name = ""
+
+        if self.is_initialized:
+            name_buffer = ctypes.create_string_buffer(256)
+            self.library_handle.sls_GetFilterStateName(self.instrument_index, filter_index, state_index, name_buffer, 256)
+            state_name = name_buffer.value.decode('utf-8', errors='ignore')
+
+        return state_name
+
+
+    def get_filter_bandwidth(self, filter_index: int, state_index: int) -> Tuple[int, int]:
+        minimum_wavelength = 0
+        maximum_wavelength = 0
+
+        if self.is_initialized:
+            minimum_wavelength_parameter = ctypes.c_int()
+            maximum_wavelength_parameter = ctypes.c_int()
+            self.library_handle.sls_GetFilterStatePrm(
+                self.instrument_index,
+                filter_index,
+                state_index,
+                ctypes.byref(minimum_wavelength_parameter),
+                ctypes.byref(maximum_wavelength_parameter)
+            )
+            minimum_wavelength = minimum_wavelength_parameter.value
+            maximum_wavelength = maximum_wavelength_parameter.value
+
+        return minimum_wavelength, maximum_wavelength
+
+
+    def get_filter_state(self, filter_index: int) -> int:
+        state_value = -1
+
+        if self.is_initialized:
+            state_index = ctypes.c_int()
+            self.library_handle.sls_GetFilterStateIdx(self.instrument_index, filter_index, ctypes.byref(state_index))
+            state_value = state_index.value
+
+        return state_value
+
+
+    def set_filter_state(self, filter_index: int, state_index: int) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_SetFilterStateIdx(self.instrument_index, filter_index, state_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def set_filter_state_async(self, filter_index: int, state_index: int) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_SetFilterStateIdxAsync(self.instrument_index, filter_index, state_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def get_shutter_count(self) -> int:
+        shutter_count_value = 0
+
+        if self.is_initialized:
+            shutter_count = ctypes.c_int()
+            self.library_handle.sls_GetShutterCount(self.instrument_index, ctypes.byref(shutter_count))
+            shutter_count_value = shutter_count.value
+
+        return shutter_count_value
+
+
+    def get_shutter_name(self, shutter_index: int) -> str:
+        shutter_name = ""
+
+        if self.is_initialized:
+            name_buffer = ctypes.create_string_buffer(256)
+            self.library_handle.sls_GetShutterName(self.instrument_index, shutter_index, name_buffer, 256)
+            shutter_name = name_buffer.value.decode('utf-8', errors='ignore')
+
+        return shutter_name
+
+
+    def shutter_open(self, shutter_index: int = 0) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_ShutterOpen(self.instrument_index, shutter_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def shutter_open_async(self, shutter_index: int = 0) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_ShutterOpenAsync(self.instrument_index, shutter_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def shutter_close(self, shutter_index: int = 0) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_ShutterClose(self.instrument_index, shutter_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def shutter_close_async(self, shutter_index: int = 0) -> bool:
+        operation_status = False
+
+        if self.is_initialized:
+            result = self.library_handle.sls_ShutterCloseAsync(self.instrument_index, shutter_index)
+            operation_status = bool(result)
+
+        return operation_status
+
+
+    def get_shutter_state(self, shutter_index: int = 0) -> int:
+        shutter_state_value = -1
+
+        if self.is_initialized:
+            shutter_state = ctypes.c_int()
+            self.library_handle.sls_GetShutterState(self.instrument_index, shutter_index, ctypes.byref(shutter_state))
+            shutter_state_value = shutter_state.value
+
+        return shutter_state_value
+
+
+    def get_wavelength_at_pixel(self, central_wavelength: float, central_pixel: int, pixel_pitch_micrometers: float, pixel_number: int) -> float:
+        wavelength_value = 0.0
+
+        if self.is_initialized:
+            wavelength = ctypes.c_double()
+            self.library_handle.sls_GetPixelClbr(
+                self.instrument_index,
+                ctypes.c_double(central_wavelength),
+                central_pixel,
+                ctypes.c_double(pixel_pitch_micrometers),
+                pixel_number,
+                ctypes.byref(wavelength)
+            )
+            wavelength_value = wavelength.value
+
+        return wavelength_value
+
+
+    def get_calibration_array(self, central_wavelength: float, central_pixel: int, pixel_pitch_micrometers: float, pixel_count: int) -> List[float]:
+        calibration_values = []
+
+        if self.is_initialized:
+            calibration_array = (ctypes.c_double * pixel_count)()
+            self.library_handle.sls_GetCalibration(
+                self.instrument_index,
+                ctypes.c_double(central_wavelength),
+                central_pixel,
+                ctypes.c_double(pixel_pitch_micrometers),
+                pixel_count,
+                calibration_array
+            )
+            calibration_values = [calibration_array[i] for i in range(pixel_count)]
+
+        return calibration_values
