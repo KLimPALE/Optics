@@ -6,7 +6,7 @@ from typing import List
 
 
 class Chromator:
-    def __init__(self, sdk_path: str = "sdk"):
+    def __init__(self, sdk_path: str = "../sdk"):
         self.sdk_path = Path(sdk_path)
         self.library_handle = None
         self.instrument_index = 0
