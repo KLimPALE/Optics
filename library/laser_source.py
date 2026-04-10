@@ -68,6 +68,19 @@ class LaserSource:
         self.is_connected = False
 
 
+    def is_connected(self) -> bool:
+        connection_status = False
+
+        if self.is_connected:
+            try:
+                response_string = self.send_command("?")
+                connection_status = len(response_string) > 0
+            except:
+                connection_status = False
+
+        return connection_status
+
+
     def send_command(self, command_string: str) -> str:
         response_string = ""
 

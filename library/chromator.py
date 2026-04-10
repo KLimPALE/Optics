@@ -143,6 +143,19 @@ class Chromator:
             self.library_handle = None
 
 
+    def is_connected(self) -> bool:
+        connection_status = False
+
+        if self.is_initialized:
+            try:
+                status_value = self.get_status()
+                connection_status = status_value >= 0
+            except:
+                connection_status = False
+
+        return connection_status
+
+
     def get_last_error(self) -> str:
         error_message = ""
 

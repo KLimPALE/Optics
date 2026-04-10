@@ -68,6 +68,21 @@ class Oscilloscope:
         self.is_connected = False
 
 
+    def is_connected(self) -> bool:
+        connection_status = False
+
+        if self.is_connected and self.instrument is not None:
+            try:
+                self.instrument.write('*IDN?')
+                time.sleep(0.2)
+                response_string = self.instrument.read()
+                connection_status = len(response_string) > 0
+            except:
+                connection_status = False
+
+        return connection_status
+
+
     def set_timeout(self, milliseconds: int):
         self.timeout_milliseconds = milliseconds
 
